@@ -158,3 +158,43 @@ async def project(slugs: str = Query(..., description="Comma-separated player sl
         }
 
     return {"ok": True, "data": results}
+
+@app.get("/debug")
+async def debug(slug: str):
+    query = """
+    query($slugs: [String!]!) {
+      players(slugs: $slugs) {
+        __typename
+        slug
+        displayName
+      }
+    }
+    """
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            SORARE_GRAPHQL,
+            json={
+                "query": query,
+                "variables": {"slugs": [slug]}
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
+
+    try:
+        body = r.json()
+    except Exception:
+        body = r.text
+
+    return {
+        "status": r.status_code,
+        "body": body
+    }
+    return {
+        "status": r.status_code,
+        "body": r.json()
+    }
