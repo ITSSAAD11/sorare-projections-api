@@ -59,7 +59,7 @@ def derive_estimates(ps, position):
 
 
 async def fetch_player(slug: str):
-    query = """
+query = """
 query PlayersQuery($slugs: [String!]!) {
   players(slugs: $slugs) {
     slug
@@ -74,6 +74,7 @@ query PlayersQuery($slugs: [String!]!) {
     }
   }
 }
+"""
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
@@ -136,7 +137,7 @@ async def project(slugs: str = Query(..., description="Comma-separated player sl
             results[slug] = player  # keep the debug info
             continue
 
-        ps = compute_ps(player.get("so5Scores") or [])
+        ps = compute_ps(player.get("playerGameScores") or [])
         # anyPositions is usually a list like ["Defender"] or ["Midfielder"]
         raw_pos = player.get("anyPositions") or []
         if isinstance(raw_pos, list) and raw_pos:
