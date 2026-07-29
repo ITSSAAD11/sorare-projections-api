@@ -132,7 +132,12 @@ async def project(slugs: str = Query(..., description="Comma-separated player sl
             continue
 
         ps = compute_ps(player.get("so5Scores") or [])
-        position = player.get("position") or "MID"
+        # anyPositions is usually a list like ["Defender"] or ["Midfielder"]
+        raw_pos = player.get("anyPositions") or player.get("position") or []
+        if isinstance(raw_pos, list) and raw_pos:
+            position = raw_pos[0]
+        else:
+            position = raw_pos or "MID"
         estimates = derive_estimates(ps, position)
 
         results[slug] = {
