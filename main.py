@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Any, Optional
 import httpx
 
-app = FastAPI(title="Sorare Projections API", version="0.3.2")
+app = FastAPI(title="Sorare Projections API", version="0.3.3")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -11,9 +11,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Browser uses this endpoint (not federation)
 SORARE_GRAPHQL = "https://api.sorare.com/graphql"
 
+# NOTE: allPlayerGameScores is NOT allowed inside players(slugs:) list queries.
+# Use averageScore + nextGame + nextClassicFixtureProjected* only.
 QUERY = """
 query PlayersQuery($slugs: [String!]!) {
   players(slugs: $slugs) {
@@ -24,6 +25,12 @@ query PlayersQuery($slugs: [String!]!) {
     averageScore(type: LAST_FIVE_SO5_AVERAGE_SCORE)
     averageScore10: averageScore(type: LAST_TEN_PLAYED_SO5_AVERAGE_SCORE)
     averageScore40: averageScore(type: LAST_FORTY_SO5_AVERAGE_SCORE)
+    nextClassicFixtureProjectedScore
+    nextClassicFixtureProjectedGrade {
+      grade
+      reliabilityBasisPoints
+      score
+    }
     nextGame(so5FixtureEligible: true) {
       ... on Game {
         id
@@ -31,25 +38,6 @@ query PlayersQuery($slugs: [String!]!) {
         statusTyped
         homeTeam { name slug }
         awayTeam { name slug }
-      }
-    }
-    allPlayerGameScores(first: 20) {
-      nodes {
-        score
-        projectedScore
-        scoreStatus
-        positionTyped
-        projection {
-          grade
-          reliabilityBasisPoints
-          score
-        }
-        anyGame {
-          date
-          statusTyped
-          homeTeam { name slug }
-          awayTeam { name slug }
-        }
       }
     }
   }
@@ -70,111 +58,60 @@ def normalize_position(raw: Any) -> str:
     return "MID"
 
 
-def avg_final_scores(nodes: list, n: int) -> Optional[float]:
-    """Average of last N FINAL SO5 scores only (real data)."""
-    finals = [
-        x["score"]
-        for x in nodes
-        if x.get("scoreStatus") == "FINAL" and isinstance(x.get("score"), (int, float))
-    ]
-    if not finals:
-        return None
-    take = finals[:n]
-    return round(sum(take) / len(take), 1)
-
-
-def find_upcoming(nodes: list) -> Optional[dict]:
-    """Pick first scheduled/pending game; prefer one with a real projection."""
-    scheduled = []
-    for node in nodes:
-        game = node.get("anyGame") or {}
-        st = str(game.get("statusTyped") or "").upper()
-        if "SCHEDULE" in st or node.get("scoreStatus") == "PENDING":
-            scheduled.append(node)
-    if not scheduled:
-        return None
-    for node in scheduled:
-        proj = node.get("projection")
-        ps = node.get("projectedScore")
-        if proj or (isinstance(ps, (int, float)) and ps > 0):
-            return node
-    return scheduled[0]
-
-
 def pack_player(player: dict) -> dict:
-    nodes = ((player.get("allPlayerGameScores") or {}).get("nodes")) or []
     position = normalize_position(player.get("anyPositions"))
     club = (player.get("activeClub") or {}).get("name")
 
-    # Prefer official averageScore; fallback to FINAL score average
     last5 = player.get("averageScore")
     last10 = player.get("averageScore10")
     last40 = player.get("averageScore40")
-    if not isinstance(last5, (int, float)):
-        last5 = avg_final_scores(nodes, 5)
-    if not isinstance(last10, (int, float)):
-        last10 = avg_final_scores(nodes, 10)
-    if not isinstance(last40, (int, float)):
-        last40 = avg_final_scores(nodes, 40)
+    if isinstance(last5, (int, float)):
+        last5 = round(last5, 1)
+    else:
+        last5 = None
+    if isinstance(last10, (int, float)):
+        last10 = round(last10, 1)
+    else:
+        last10 = None
+    if isinstance(last40, (int, float)):
+        last40 = round(last40, 1)
+    else:
+        last40 = None
 
-    recent = []
-    for x in nodes:
-        if x.get("scoreStatus") != "FINAL":
-            continue
-        g = x.get("anyGame") or {}
-        recent.append(
-            {
-                "score": x.get("score"),
-                "date": g.get("date"),
-                "home": (g.get("homeTeam") or {}).get("name"),
-                "away": (g.get("awayTeam") or {}).get("name"),
-            }
-        )
-        if len(recent) >= 5:
-            break
-
-    next_game_api = player.get("nextGame")
-    upcoming_node = find_upcoming(nodes)
-    has_fixture = bool(next_game_api) or bool(upcoming_node)
+    next_game = player.get("nextGame")
+    has_fixture = next_game is not None
 
     fixture = None
-    sorare_projection = None
-
-    if upcoming_node:
-        g = upcoming_node.get("anyGame") or {}
+    if has_fixture and isinstance(next_game, dict):
+        home = next_game.get("homeTeam") or {}
+        away = next_game.get("awayTeam") or {}
         fixture = {
-            "kickoff": g.get("date"),
-            "homeTeam": (g.get("homeTeam") or {}).get("name"),
-            "awayTeam": (g.get("awayTeam") or {}).get("name"),
-            "home": bool(club and (g.get("homeTeam") or {}).get("name") == club),
-            "status": g.get("statusTyped"),
+            "kickoff": next_game.get("date"),
+            "homeTeam": home.get("name"),
+            "awayTeam": away.get("name"),
+            "home": bool(club and home.get("name") == club),
+            "status": next_game.get("statusTyped"),
         }
-        proj = upcoming_node.get("projection")
-        ps = upcoming_node.get("projectedScore")
-        if proj or (isinstance(ps, (int, float)) and ps > 0):
+
+    sorare_projection = None
+    if has_fixture:
+        grade_obj = player.get("nextClassicFixtureProjectedGrade")
+        ps = player.get("nextClassicFixtureProjectedScore")
+        if grade_obj or (isinstance(ps, (int, float)) and ps > 0):
             sorare_projection = {
                 "score": (
-                    proj.get("score")
-                    if proj and proj.get("score") is not None
+                    grade_obj.get("score")
+                    if grade_obj and grade_obj.get("score") is not None
                     else ps
                 ),
-                "grade": (proj or {}).get("grade"),
+                "grade": (grade_obj or {}).get("grade"),
                 "reliabilityPct": (
-                    round(proj["reliabilityBasisPoints"] / 100, 1)
-                    if proj and isinstance(proj.get("reliabilityBasisPoints"), int)
+                    round(grade_obj["reliabilityBasisPoints"] / 100, 1)
+                    if grade_obj
+                    and isinstance(grade_obj.get("reliabilityBasisPoints"), int)
                     else None
                 ),
             }
-    elif next_game_api:
-        fixture = {
-            "kickoff": next_game_api.get("date"),
-            "homeTeam": (next_game_api.get("homeTeam") or {}).get("name"),
-            "awayTeam": (next_game_api.get("awayTeam") or {}).get("name"),
-            "home": bool(
-                club and (next_game_api.get("homeTeam") or {}).get("name") == club
-            ),
-            "status": next_game_api.get("statusTyped"),
-        }
 
     return {
         "slug": player.get("slug"),
@@ -185,7 +122,6 @@ def pack_player(player: dict) -> dict:
             "last5": last5,
             "last10": last10,
             "last40": last40,
-            "recentScores": recent,
         },
         "hasUpcomingFixture": has_fixture,
         "fixture": fixture,
@@ -219,7 +155,7 @@ def root():
     return {
         "status": "ok",
         "message": "Sorare Projections API is running",
-        "version": "0.3.2",
+        "version": "0.3.3",
     }
 
 
@@ -260,7 +196,7 @@ async def project(
 
     return {
         "ok": True,
-        "version": "0.3.2",
+        "version": "0.3.3",
         "data": results,
         "_meta": {
             "graphqlStatus": fetched["status"],
