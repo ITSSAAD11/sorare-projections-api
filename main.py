@@ -162,13 +162,21 @@ async def project(slugs: str = Query(..., description="Comma-separated player sl
 @app.get("/debug")
 async def debug(slug: str):
     query = """
-    query($slugs: [String!]!) {
-      players(slugs: $slugs) {
-        __typename
-        slug
-        displayName
-      }
+query($slugs: [String!]!) {
+  players(slugs: $slugs) {
+    __typename
+    slug
+    displayName
+    activeClub {
+      name
+      slug
     }
+    anyPositions
+    nextGame {
+      __typename
+    }
+  }
+}
     """
 
     async with httpx.AsyncClient(timeout=20.0) as client:
