@@ -60,16 +60,20 @@ def derive_estimates(ps, position):
 
 async def fetch_player(slug: str):
     query = """
-    query PlayersQuery($slugs: [String!]!) {
-      players(slugs: $slugs) {
-        slug
-        displayName
-        anyPositions
-        so5Scores(last: 5) { score }
-        activeClub { name slug }
-      }
+query PlayersQuery($slugs: [String!]!) {
+  players(slugs: $slugs) {
+    slug
+    displayName
+    anyPositions
+    playerGameScores(last: 5) {
+      score
     }
-    """
+    activeClub {
+      name
+      slug
+    }
+  }
+}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
