@@ -60,8 +60,8 @@ def derive_estimates(ps, position):
 
 async def fetch_player(slug: str):
     query = """
-    query PlayerQuery($slug: String!) {
-      player(slug: $slug) {
+    query PlayersQuery($slugs: [String!]!) {
+      players(slugs: $slugs) {
         slug
         displayName
         position
@@ -74,7 +74,7 @@ async def fetch_player(slug: str):
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 SORARE_GRAPHQL,
-                json={"query": query, "variables": {"slug": slug}},
+                json={"query": query, "variables": {"slugs": [slug]}},
                 headers={
                     "Content-Type": "application/json",
                     "User-Agent": "Mozilla/5.0 (compatible; SorareProjections/1.0)",
@@ -83,7 +83,7 @@ async def fetch_player(slug: str):
             )
             body = r.json()
             # Return extra debug info when player is missing
-            if r.status_code != 200 or body.get("errors") or not body.get("data", {}).get("player"):
+            if r.status_code != 200 or body.get("errors"):
                 return {
                     "_debug": {
                         "status": r.status_code,
@@ -92,7 +92,18 @@ async def fetch_player(slug: str):
                         "slug_tried": slug,
                     }
                 }
-            return body["data"]["player"]
+            players = (body.get("data") or {}).get("players") or []
+            if not players:
+                return {
+                    "_debug": {
+                        "status": r.status_code,
+                        "errors": body.get("errors"),
+                        "data": body.get("data"),
+                        "slug_tried": slug,
+                        "note": "players list empty",
+                    }
+                }
+            return players[0]
     except Exception as e:
         return {"_debug": {"exception": str(e), "slug_tried": slug}}
 
