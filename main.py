@@ -4,9 +4,8 @@ from typing import List
 import httpx
 import asyncio
 
-app = FastAPI(title="Sorare Projections API", version="0.1.0")
+app = FastAPI(title="Sorare Projections API", version="0.1.1")
 
-# Allow the Chrome extension to call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,7 +30,6 @@ def compute_ps(so5_scores):
 
 
 def derive_estimates(ps, position):
-    """Temporary simple model. Will be replaced by real opponent-based model later."""
     pos = (position or "MID").upper()
     p = ps if isinstance(ps, (int, float)) else 40.0
 
@@ -48,7 +46,7 @@ def derive_estimates(ps, position):
     elif pos in ("ATT", "FW"):
         xg = round(p * 0.030, 2)
         xa = round(p * 0.015, 2)
-    else:  # MID
+    else:
         xg = round(p * 0.016, 2)
         xa = round(p * 0.022, 2)
 
@@ -61,31 +59,47 @@ def derive_estimates(ps, position):
 
 
 async def fetch_player(slug: str):
-    query = f"""
-    query {{
-      player(slug: "{slug}") {{
+    query = """
+    query PlayerQuery($slug: String!) {
+      player(slug: $slug) {
         slug
         displayName
         position
-        so5Scores(last: 5) {{ score }}
-        activeClub {{ name slug }}
-      }}
-    }}
+        so5Scores(last: 5) { score }
+        activeClub { name slug }
+      }
+    }
     """
-    async with httpx.AsyncClient(timeout=12.0) as client:
-        r = await client.post(
-            SORARE_GRAPHQL,
-            json={"query": query},
-            headers={"Content-Type": "application/json"},
-        )
-        r.raise_for_status()
-        data = r.json().get("data", {}).get("player")
-        return data
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                SORARE_GRAPHQL,
+                json={"query": query, "variables": {"slug": slug}},
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (compatible; SorareProjections/1.0)",
+                    "Accept": "application/json",
+                },
+            )
+            body = r.json()
+            # Return extra debug info when player is missing
+            if r.status_code != 200 or body.get("errors") or not body.get("data", {}).get("player"):
+                return {
+                    "_debug": {
+                        "status": r.status_code,
+                        "errors": body.get("errors"),
+                        "data": body.get("data"),
+                        "slug_tried": slug,
+                    }
+                }
+            return body["data"]["player"]
+    except Exception as e:
+        return {"_debug": {"exception": str(e), "slug_tried": slug}}
 
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Sorare Projections API is running"}
+    return {"status": "ok", "message": "Sorare Projections API is running", "version": "0.1.1"}
 
 
 @app.get("/health")
@@ -95,19 +109,15 @@ def health():
 
 @app.get("/project")
 async def project(slugs: str = Query(..., description="Comma-separated player slugs")):
-    """
-    Example: /project?slugs=andy-aryel-najar-rodriguez,nico-schlotterbeck
-    """
-    slug_list = [s.strip() for s in slugs.split(",") if s.strip()]
-    slug_list = slug_list[:20]  # safety limit
+    slug_list = [s.strip() for s in slugs.split(",") if s.strip()][:10]
 
     results = {}
     tasks = [fetch_player(slug) for slug in slug_list]
-    players = await asyncio.gather(*tasks, return_exceptions=True)
+    players = await asyncio.gather(*tasks)
 
     for slug, player in zip(slug_list, players):
-        if isinstance(player, Exception) or player is None:
-            results[slug] = None
+        if player is None or "_debug" in player:
+            results[slug] = player  # keep the debug info
             continue
 
         ps = compute_ps(player.get("so5Scores") or [])
@@ -125,15 +135,9 @@ async def project(slugs: str = Query(..., description="Comma-separated player sl
             "xa": estimates["xa"],
             "club": (player.get("activeClub") or {}).get("name"),
             "source": "sorare+model",
-            # These will be filled later with real next-match data
             "opponent": None,
             "home": None,
             "kickoff": None,
         }
 
     return {"ok": True, "data": results}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
