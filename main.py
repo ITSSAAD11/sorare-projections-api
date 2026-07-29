@@ -13,7 +13,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SORARE_GRAPHQL = "https://api.sorare.com/graphql"
+SORARE_GRAPHQL = "https://api.sorare.com/federation/graphql"
 
 
 def clamp(v, min_v, max_v):
