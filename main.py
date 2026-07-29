@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Any, Optional
 import httpx
 
-app = FastAPI(title="Sorare Projections API", version="0.3.1")
+app = FastAPI(title="Sorare Projections API", version="0.3.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -11,7 +11,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SORARE_GRAPHQL = "https://api.sorare.com/federation/graphql"
+# Browser uses this endpoint (not federation)
+SORARE_GRAPHQL = "https://api.sorare.com/graphql"
 
 QUERY = """
 query PlayersQuery($slugs: [String!]!) {
@@ -49,15 +50,6 @@ query PlayersQuery($slugs: [String!]!) {
           homeTeam { name slug }
           awayTeam { name slug }
         }
-        anyPlayerGameStats {
-          minsPlayed
-          gameStarted
-          fieldStatus
-          footballPlayingStatusOdds {
-            reliability
-            starterOddsBasisPoints
-          }
-        }
       }
     }
   }
@@ -79,6 +71,7 @@ def normalize_position(raw: Any) -> str:
 
 
 def avg_final_scores(nodes: list, n: int) -> Optional[float]:
+    """Average of last N FINAL SO5 scores only (real data)."""
     finals = [
         x["score"]
         for x in nodes
@@ -91,6 +84,7 @@ def avg_final_scores(nodes: list, n: int) -> Optional[float]:
 
 
 def find_upcoming(nodes: list) -> Optional[dict]:
+    """Pick first scheduled/pending game; prefer one with a real projection."""
     scheduled = []
     for node in nodes:
         game = node.get("anyGame") or {}
@@ -112,6 +106,7 @@ def pack_player(player: dict) -> dict:
     position = normalize_position(player.get("anyPositions"))
     club = (player.get("activeClub") or {}).get("name")
 
+    # Prefer official averageScore; fallback to FINAL score average
     last5 = player.get("averageScore")
     last10 = player.get("averageScore10")
     last40 = player.get("averageScore40")
@@ -127,13 +122,14 @@ def pack_player(player: dict) -> dict:
         if x.get("scoreStatus") != "FINAL":
             continue
         g = x.get("anyGame") or {}
-        recent.append({
-            "score": x.get("score"),
-            "date": g.get("date"),
-            "home": (g.get("homeTeam") or {}).get("name"),
-            "away": (g.get("awayTeam") or {}).get("name"),
-            "mins": (x.get("anyPlayerGameStats") or {}).get("minsPlayed"),
-        })
+        recent.append(
+            {
+                "score": x.get("score"),
+                "date": g.get("date"),
+                "home": (g.get("homeTeam") or {}).get("name"),
+                "away": (g.get("awayTeam") or {}).get("name"),
+            }
+        )
         if len(recent) >= 5:
             break
 
@@ -143,28 +139,25 @@ def pack_player(player: dict) -> dict:
 
     fixture = None
     sorare_projection = None
-    starter_odds_pct = None
 
     if upcoming_node:
         g = upcoming_node.get("anyGame") or {}
-        stats = upcoming_node.get("anyPlayerGameStats") or {}
-        odds = stats.get("footballPlayingStatusOdds") or {}
-        if isinstance(odds.get("starterOddsBasisPoints"), int):
-            starter_odds_pct = round(odds["starterOddsBasisPoints"] / 100, 1)
-
         fixture = {
             "kickoff": g.get("date"),
             "homeTeam": (g.get("homeTeam") or {}).get("name"),
             "awayTeam": (g.get("awayTeam") or {}).get("name"),
-            "home": club and (g.get("homeTeam") or {}).get("name") == club,
+            "home": bool(club and (g.get("homeTeam") or {}).get("name") == club),
             "status": g.get("statusTyped"),
         }
-
         proj = upcoming_node.get("projection")
         ps = upcoming_node.get("projectedScore")
         if proj or (isinstance(ps, (int, float)) and ps > 0):
             sorare_projection = {
-                "score": proj.get("score") if proj and proj.get("score") is not None else ps,
+                "score": (
+                    proj.get("score")
+                    if proj and proj.get("score") is not None
+                    else ps
+                ),
                 "grade": (proj or {}).get("grade"),
                 "reliabilityPct": (
                     round(proj["reliabilityBasisPoints"] / 100, 1)
@@ -177,7 +170,9 @@ def pack_player(player: dict) -> dict:
             "kickoff": next_game_api.get("date"),
             "homeTeam": (next_game_api.get("homeTeam") or {}).get("name"),
             "awayTeam": (next_game_api.get("awayTeam") or {}).get("name"),
-            "home": club and (next_game_api.get("homeTeam") or {}).get("name") == club,
+            "home": bool(
+                club and (next_game_api.get("homeTeam") or {}).get("name") == club
+            ),
             "status": next_game_api.get("statusTyped"),
         }
 
@@ -195,7 +190,6 @@ def pack_player(player: dict) -> dict:
         "hasUpcomingFixture": has_fixture,
         "fixture": fixture,
         "sorareProjection": sorare_projection if has_fixture else None,
-        "starterOddsPct": starter_odds_pct if has_fixture else None,
         "message": None if has_fixture else "No upcoming fixture",
         "source": "sorare-official",
     }
@@ -222,7 +216,11 @@ async def fetch_players(slugs: List[str]) -> dict:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "version": "0.3.1"}
+    return {
+        "status": "ok",
+        "message": "Sorare Projections API is running",
+        "version": "0.3.2",
+    }
 
 
 @app.get("/health")
@@ -231,7 +229,9 @@ def health():
 
 
 @app.get("/project")
-async def project(slugs: str = Query(...)):
+async def project(
+    slugs: str = Query(..., description="Comma-separated player slugs"),
+):
     slug_list = [s.strip() for s in slugs.split(",") if s.strip()][:15]
     if not slug_list:
         return {"ok": False, "error": "no slugs", "data": {}}
@@ -260,7 +260,7 @@ async def project(slugs: str = Query(...)):
 
     return {
         "ok": True,
-        "version": "0.3.1",
+        "version": "0.3.2",
         "data": results,
         "_meta": {
             "graphqlStatus": fetched["status"],
